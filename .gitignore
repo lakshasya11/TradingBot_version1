@@ -1,0 +1,8 @@
+.env
+models/
+historical_data/
+__pycache__/
+*.pyc
+trade_log.csv
+trading_log.txt
+trade_backend/venv/
