@@ -22,9 +22,11 @@ class EnhancedTradingStrategy:
         self.data_cache = {}
         self.open_positions = {}
         
-        # Trailing Stop Configuration
-        self.trailing_activation = 5.0  # Trigger at $5 profit
-        self.trailing_offset = 2.0      # Trail $2 behind (starts from 3rd $)
+        # Exit Configuration
+        self.atr_sl_multiplier = 2.5    # Stop loss at 2.5x ATR
+        self.tp_usd = 10.0              # Take profit at $10
+        self.trailing_activation = 5.0  # Activate trailing + breakeven at $5 profit
+        self.trailing_offset = 2.0      # Trail $2 behind current price
         
     def log(self, message: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -60,7 +62,7 @@ class EnhancedTradingStrategy:
         """Calculate EMA indicator"""
         return df['close'].ewm(span=period, adjust=False).mean()
 
-    def calculate_supertrend_pinescript(self, df: pd.DataFrame, atr_length: int = 14, atr_multiplier: float = 3.5, smoothing_period: int = 1) -> Dict:
+    def calculate_supertrend_pinescript(self, df: pd.DataFrame, atr_length: int = 5, atr_multiplier: float = 3.5, smoothing_period: int = 1) -> Dict:
         hl2 = (df['high'] + df['low']) / 2
         if smoothing_period > 1:
             smoothed_source = hl2.ewm(span=smoothing_period, adjust=False).mean()
@@ -115,7 +117,7 @@ class EnhancedTradingStrategy:
 
 
 
-    def calculate_atr(self, df: pd.DataFrame, period: int = 10) -> pd.Series:
+    def calculate_atr(self, df: pd.DataFrame, period: int = 5) -> pd.Series:
         """Calculate ATR using Wilder's smoothing (RMA)"""
         tr1 = df['high'] - df['low']
         tr2 = (df['high'] - df['close'].shift()).abs()
@@ -167,12 +169,12 @@ class EnhancedTradingStrategy:
         ema9 = close.ewm(span=9, adjust=False).mean()
         ema21 = close.ewm(span=21, adjust=False).mean()
         
-        # ATR calculation (Wilder's, 14 period)
+        # ATR calculation (Wilder's, 5 period)
         tr1 = df['high'] - df['low']
         tr2 = (df['high'] - close.shift()).abs()
         tr3 = (df['low'] - close.shift()).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr_val = tr.ewm(alpha=1.0/14, adjust=False).mean()
+        atr_val = tr.ewm(alpha=1.0/5, adjust=False).mean()
         
         return {
                 'rsi': rsi.iloc[-1] if len(rsi) > 0 and not pd.isna(rsi.iloc[-1]) else 50,
@@ -250,81 +252,79 @@ class EnhancedTradingStrategy:
         except Exception:
             return 0.01
 
+    def dollars_to_price(self, dollars: float, volume: float) -> float:
+        """Convert dollar amount to price distance for the symbol"""
+        symbol_info = mt5.symbol_info(self.symbol)
+        if not symbol_info:
+            return 0.0
+        tick_value = symbol_info.trade_tick_value
+        tick_size = symbol_info.trade_tick_size
+        if tick_value > 0 and volume > 0:
+            return (dollars / (volume * tick_value)) * tick_size
+        return 0.0
+
     def execute_trade(self, signal: str, analysis: Dict):
-        """Execute trade with ATR-based stop loss for BUY, SuperTrend for SELL"""
+        """Execute trade with adaptive 2.5x ATR SL and $10 TP"""
         try:
             tick = mt5.symbol_info_tick(self.symbol)
             if not tick:
                 self.log("Failed to get tick data")
                 return
-            
+
+            symbol_info = mt5.symbol_info(self.symbol)
+            if not symbol_info:
+                return
+
             entry_price = tick.ask if signal == "BUY" else tick.bid
-            atr_value = analysis.get('atr', 0)
-            supertrend_sl = analysis.get('supertrend_sl', 0)
-            
+            volume = symbol_info.volume_min
+
+            atr = analysis.get('atr', 0)
+            sl_distance = atr * self.atr_sl_multiplier
+            tp_distance = self.dollars_to_price(self.tp_usd, volume)
+
             if signal == "BUY":
-                # ATR-based stop loss for BUY
-                stop_distance = atr_value * 1.1
-                stop_loss = entry_price - stop_distance
-                take_profit = entry_price + (stop_distance * 2)
+                stop_loss = round(entry_price - sl_distance, symbol_info.digits)
+                take_profit = round(entry_price + tp_distance, symbol_info.digits)
                 order_type = mt5.ORDER_TYPE_BUY
             else:
-                # SuperTrend-based stop loss for SELL (period=5, multiplier=1)
-                stop_loss = supertrend_sl
-                risk_distance = abs(entry_price - stop_loss)
-                take_profit = entry_price - (risk_distance * 2)
+                stop_loss = round(entry_price + sl_distance, symbol_info.digits)
+                take_profit = round(entry_price - tp_distance, symbol_info.digits)
                 order_type = mt5.ORDER_TYPE_SELL
-            
-            # Calculate position size
-            position_size = self.calculate_position_size(entry_price, stop_loss)
-            
-            # Get symbol info for rounding
-            symbol_info = mt5.symbol_info(self.symbol)
-            if symbol_info:
-                digits = symbol_info.digits
-                stop_loss = round(stop_loss, digits)
-                take_profit = round(take_profit, digits)
-            
-            # Create order request
+
+            self.log(f"📐 ATR SL | ATR: {atr:.5f} | x{self.atr_sl_multiplier} = {sl_distance:.5f} | SL: {stop_loss:.5f}")
+
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": self.symbol,
-                "volume": position_size,
+                "volume": volume,
                 "type": order_type,
                 "price": entry_price,
                 "sl": stop_loss,
                 "tp": take_profit,
                 "magic": 123456,
-                "comment": f"{signal}_ATR_Strategy",
+                "comment": f"{signal}_Strategy",
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
-            
-            # Execute order
+
             result = mt5.order_send(request)
-            
+
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                 self.log(f"✅ {signal} ORDER EXECUTED")
-                self.log(f"   Entry: {entry_price:.5f}")
-                self.log(f"   Stop Loss: {stop_loss:.5f}")
-                self.log(f"   Take Profit: {take_profit:.5f}")
-                self.log(f"   Volume: {position_size}")
-                
-                # Store position for exit management
+                self.log(f"   Entry: {entry_price:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
+                self.log(f"   ATR: {atr:.5f} | SL Multiplier: {self.atr_sl_multiplier} | Target: ${self.tp_usd} | Volume: {volume}")
                 self.open_positions[result.order] = {
                     'entry_price': entry_price,
-                    'stop_loss': stop_loss,
                     'direction': signal,
-                    'atr_at_entry': atr_value
+                    'breakeven_set': False
                 }
             else:
-                error_msg = result.comment if result else "Unknown error"
-                self.log(f"❌ ORDER FAILED: {error_msg}")
-                
+                self.log(f"❌ ORDER FAILED: {result.comment if result else 'Unknown error'}")
+
         except Exception as e:
             self.log(f"❌ Error executing trade: {e}")
 
     def check_exit_conditions(self):
-        """Check exit conditions and implement trailing stop loss"""
+        """Check exit conditions: breakeven + trailing stop loss"""
         positions = mt5.positions_get(symbol=self.symbol)
         if not positions:
             return
@@ -333,36 +333,47 @@ class EnhancedTradingStrategy:
         if not tick:
             return
 
+        symbol_info = mt5.symbol_info(self.symbol)
+        if not symbol_info:
+            return
+
         for pos in positions:
             ticket = pos.ticket
-            entry_price = pos.price_open
             current_sl = pos.sl
             current_tp = pos.tp
-            
-            if pos.type == mt5.POSITION_TYPE_BUY:
-                current_price = tick.bid
-                profit = current_price - entry_price
-                
-                # Check for trailing stop activation
-                if profit >= self.trailing_activation:
-                    new_sl = current_price - self.trailing_offset
-                    # Only move SL up
-                    if current_sl == 0 or new_sl > current_sl:
-                        self.log(f"🚀 Trailing SL Triggered for BUY #{ticket}")
-                        self.log(f"   Profit: ${profit:.2f} | New SL: {new_sl:.2f}")
+            profit_usd = pos.profit
+            volume = pos.volume
+            pos_data = self.open_positions.get(ticket, {'breakeven_set': False})
+
+            if profit_usd >= self.trailing_activation:
+                trailing_distance = self.dollars_to_price(self.trailing_offset, volume)
+
+                if pos.type == mt5.POSITION_TYPE_BUY:
+                    current_price = tick.bid
+                    # Set breakeven once
+                    if not pos_data.get('breakeven_set'):
+                        self.log(f"🔒 Breakeven set for BUY #{ticket}")
+                        self.modify_position(ticket, pos.price_open, current_tp)
+                        pos_data['breakeven_set'] = True
+                        self.open_positions[ticket] = pos_data
+                    # Trailing SL — only moves up
+                    new_sl = current_price - trailing_distance
+                    if new_sl > current_sl:
+                        self.log(f"🚀 Trailing SL BUY #{ticket} | Profit: ${profit_usd:.2f} | New SL: {new_sl:.5f}")
                         self.modify_position(ticket, new_sl, current_tp)
-            
-            elif pos.type == mt5.POSITION_TYPE_SELL:
-                current_price = tick.ask
-                profit = entry_price - current_price
-                
-                # Check for trailing stop activation
-                if profit >= self.trailing_activation:
-                    new_sl = current_price + self.trailing_offset
-                    # Only move SL down
+
+                elif pos.type == mt5.POSITION_TYPE_SELL:
+                    current_price = tick.ask
+                    # Set breakeven once
+                    if not pos_data.get('breakeven_set'):
+                        self.log(f"🔒 Breakeven set for SELL #{ticket}")
+                        self.modify_position(ticket, pos.price_open, current_tp)
+                        pos_data['breakeven_set'] = True
+                        self.open_positions[ticket] = pos_data
+                    # Trailing SL — only moves down
+                    new_sl = current_price + trailing_distance
                     if current_sl == 0 or new_sl < current_sl:
-                        self.log(f"🚀 Trailing SL Triggered for SELL #{ticket}")
-                        self.log(f"   Profit: ${profit:.2f} | New SL: {new_sl:.2f}")
+                        self.log(f"🚀 Trailing SL SELL #{ticket} | Profit: ${profit_usd:.2f} | New SL: {new_sl:.5f}")
                         self.modify_position(ticket, new_sl, current_tp)
 
     def modify_position(self, ticket: int, new_sl: float, new_tp: float):

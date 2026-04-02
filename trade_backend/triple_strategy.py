@@ -149,11 +149,10 @@ class TripleConfirmationBot:
         
         atr = tf_15m['atr14'].iloc[-1]
         atr_multiplier = 1.5  # 1.5x ATR for stop loss
+        sl = entry_price - (atr * atr_multiplier) if direction == "BUY" else entry_price + (atr * atr_multiplier)
         
-        if direction == "BUY":
-            return entry_price - (atr * atr_multiplier)
-        else:
-            return entry_price + (atr * atr_multiplier)
+        self.log(f"📐 ATR SL | ATR(14): {atr:.5f} | Multiplier: {atr_multiplier} | SL: {sl:.5f}")
+        return sl
     
     def execute_trade(self, signal):
         """Execute trade with ATR-based stop loss"""
