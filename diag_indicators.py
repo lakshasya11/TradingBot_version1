@@ -22,7 +22,7 @@ def diagnostic_check():
     print("✅ MT5 Connected Successfully")
     
     symbol = "XAUUSD"
-    timeframe = "M5"
+    timeframe = "M1"
     strategy = EnhancedTradingStrategy(symbol, timeframe)
     
     # Fetch and calculate indicators
@@ -41,22 +41,26 @@ def diagnostic_check():
     rsi = analysis.get('rsi')
     print(f"RSI (14): {rsi:.2f} {'(OK)' if rsi else '(FAIL)'}")
     
-    # Check EMAs (9, 21)
-    ema9 = analysis.get('ema9')
-    ema21 = analysis.get('ema21')
-    print(f"EMA 9: {ema9:.5f}")
-    print(f"EMA 21: {ema21:.5f}")
-    print(f"EMA Trend: {'BULLISH' if ema9 > ema21 else 'BEARISH'}")
-    
-    # Check EMA Angle
-    ema_angle = analysis.get('ema_angle')
-    print(f"EMA 9 Angle: {ema_angle:.2f}°")
-    
-    # Check SuperTrend (10, 0.9)
-    st_val = analysis.get('supertrend_value')
-    st_dir = analysis.get('supertrend_direction')
-    st_dir_text = "BULLISH" if st_dir == 1 else "BEARISH"
-    print(f"SuperTrend (10, 0.9): {st_val:.5f} ({st_dir_text})")
+    # --- EMA checks commented out (replaced by UT Bot) ---
+    # ema9 = analysis.get('ema9')
+    # ema21 = analysis.get('ema21')
+    # print(f"EMA 9: {ema9:.5f}")
+    # print(f"EMA 21: {ema21:.5f}")
+    # print(f"EMA Trend: {'BULLISH' if ema9 > ema21 else 'BEARISH'}")
+    # ema_angle = analysis.get('ema_angle')
+    # print(f"EMA 9 Angle: {ema_angle:.2f}°")
+    # st_val = analysis.get('supertrend_value')
+    # st_dir = analysis.get('supertrend_direction')
+    # st_dir_text = "BULLISH" if st_dir == 1 else "BEARISH"
+    # print(f"SuperTrend (10, 0.9): {st_val:.5f} ({st_dir_text})")
+
+    # --- UT Bot diagnostics ---
+    trail_stop = analysis.get('trail_stop')
+    ut_buy     = analysis.get('ut_buy')
+    ut_sell    = analysis.get('ut_sell')
+    print(f"UT Trail Stop: {trail_stop:.5f}")
+    print(f"UT Buy Signal:  {ut_buy}")
+    print(f"UT Sell Signal: {ut_sell}")
     
     # Check Signal Logic
     signal = strategy.check_entry_conditions(analysis)

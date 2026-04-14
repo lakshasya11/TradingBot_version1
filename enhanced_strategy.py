@@ -28,8 +28,8 @@ class EnhancedTradingStrategy:
         self.atr_sl_multiplier = 1.5    # Stop loss at 1.5x ATR
         self.tp_points = 10.0           # Take profit after 10.0 pts move
         self.breakeven_points = 3.0     # Activate breakeven after 3.0 pts move
-        self.trailing_points = 5.0      # Activate trailing after 5.0 pts move
-        self.trailing_gap = 2.0         # Trail 2.0 pts behind current price
+        self.trailing_points = 1.0      # Activate trailing after 1.0 pts move
+        self.trailing_gap = 1.0         # Trail 1.0 pts behind current price
         
     def log(self, message: str):
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -120,7 +120,7 @@ class EnhancedTradingStrategy:
 
 
 
-    def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+    def calculate_atr(self, df: pd.DataFrame, period: int = 20) -> pd.Series:
         """Calculate ATR using Wilder's smoothing (RMA)"""
         tr1 = df['high'] - df['low']
         tr2 = (df['high'] - df['close'].shift()).abs()
@@ -191,66 +191,105 @@ class EnhancedTradingStrategy:
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
         
-        # EMA calculations
-        ema9 = close.ewm(span=9, adjust=False).mean()
-        ema21 = close.ewm(span=21, adjust=False).mean()
-        
+        # --- EMA conditions commented out (replaced by UT Bot) ---
+        # ema9 = close.ewm(span=9, adjust=False).mean()
+        # ema21 = close.ewm(span=21, adjust=False).mean()
+        # ema_angle = self.calculate_ema_angle(ema9)
+
         # ATR calculation (Wilder's, 20 period)
         tr1 = df['high'] - df['low']
         tr2 = (df['high'] - close.shift()).abs()
         tr3 = (df['low'] - close.shift()).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr_val = tr.ewm(alpha=1.0/20, adjust=False).mean()
-        
+
+        # --- UT Bot Trailing Stop (Key_Value=2.0, ATR_Period=1) ---
+        ut_trail = self.calculate_ut_trail(df, key_value=2.0)
+        close_arr = close.values
+        # Use previous closed candle [-2] for UT trail — stable, not repainting
+        ut_buy  = bool(close_arr[-1] > ut_trail[-2])
+        ut_sell = bool(close_arr[-1] < ut_trail[-2])
+        candle_color = 'GREEN' if close.iloc[-1] > df['open'].iloc[-1] else 'RED'
+
         return {
                 'rsi': rsi.iloc[-1] if len(rsi) > 0 and not pd.isna(rsi.iloc[-1]) else 50,
-                'ema9': ema9.iloc[-1] if len(ema9) > 0 and not pd.isna(ema9.iloc[-1]) else close.iloc[-1],
-                'ema21': ema21.iloc[-1] if len(ema21) > 0 and not pd.isna(ema21.iloc[-1]) else close.iloc[-1],
-                'candle_color': 'GREEN' if close.iloc[-1] > df['open'].iloc[-1] else 'RED',
                 'atr': atr_val.iloc[-1] if len(atr_val) > 0 and not pd.isna(atr_val.iloc[-1]) else 0.01,
                 'close': close.iloc[-1],
                 'low': df['low'].iloc[-1],
                 'high': df['high'].iloc[-1],
-                'ema_angle': self.calculate_ema_angle(ema9)
+                'candle_color': candle_color,
+                'ut_buy': ut_buy,
+                'ut_sell': ut_sell,
+                'trail_stop': ut_trail[-2]  # previous closed candle — stable value
             }
 
 
 
 
+    def calculate_ut_trail(self, df: pd.DataFrame, key_value: float = 2.0) -> np.ndarray:
+        """UT Bot ATR trailing stop (ATR_Period=1 = single candle range)"""
+        close = df['close'].values
+        high  = df['high'].values
+        low   = df['low'].values
+        n     = len(close)
+        atr   = np.abs(high - low)  # ATR period=1
+        trail = np.zeros(n)
+        trail[0] = close[0]
+        for i in range(1, n):
+            n_loss     = key_value * atr[i]
+            prev_stop  = trail[i - 1]
+            prev_close = close[i - 1]
+            if close[i] > prev_stop and prev_close > prev_stop:
+                trail[i] = max(prev_stop, close[i] - n_loss)
+            elif close[i] < prev_stop and prev_close < prev_stop:
+                trail[i] = min(prev_stop, close[i] + n_loss)
+            elif close[i] > prev_stop:
+                trail[i] = close[i] - n_loss
+            else:
+                trail[i] = close[i] + n_loss
+        return trail
+
     def check_entry_conditions(self, analysis: Dict) -> str:
         if not analysis:
             return "NONE"
 
-        rsi = analysis.get('rsi', 0)
-        ema9 = analysis.get('ema9', 0)
-        ema21 = analysis.get('ema21', 0)
+        rsi     = analysis.get('rsi', 50)
+        ut_buy  = analysis.get('ut_buy', False)
+        ut_sell = analysis.get('ut_sell', False)
+
+        # --- EMA conditions commented out ---
+        # ema9         = analysis.get('ema9', 0)
+        # ema21        = analysis.get('ema21', 0)
+        # candle_color = analysis.get('candle_color', '')
+        # low          = analysis.get('low', 0)
+        # high         = analysis.get('high', 0)
+        # ema_angle    = analysis.get('ema_angle', 0)
+        # buy_conditions = (
+        #     rsi > 50 and
+        #     ema9 > ema21 and
+        #     candle_color == 'GREEN' and
+        #     low > ema9 and
+        #     ema_angle >= 15
+        # )
+        # sell_conditions = (
+        #     rsi < 50 and
+        #     ema9 < ema21 and
+        #     candle_color == 'RED' and
+        #     high < ema9 and
+        #     ema_angle <= -15
+        # )
+
+        # --- UT Bot entry conditions ---
+        # BUY:  price crossed ABOVE trailing stop + RSI > 50
+        # SELL: price crossed BELOW trailing stop + RSI < 50
+        close    = analysis.get('close', 0)
+        trail    = analysis.get('trail_stop', 0)
+
         candle_color = analysis.get('candle_color', '')
-        low = analysis.get('low', 0)
-        high = analysis.get('high', 0)
 
-        ema_angle = analysis.get('ema_angle', 0)
-
-        # BUY Condition: RSI(14) > 50, EMA 9 > EMA 21, Green Candle, Candle Low > EMA 9, Angle >= 15
-        buy_conditions = (
-            rsi > 50 and
-            ema9 > ema21 and
-            candle_color == 'GREEN' and
-            low > ema9 and
-            ema_angle >= 15
-        )
-
-        # SELL Condition: RSI(14) < 50, EMA 9 < EMA 21, Red Candle, Candle High < EMA 9, Angle <= -15
-        sell_conditions = (
-            rsi < 50 and
-            ema9 < ema21 and
-            candle_color == 'RED' and
-            high < ema9 and
-            ema_angle <= -15
-        )
-
-        if buy_conditions:
+        if ut_buy and rsi > 50 and candle_color == 'GREEN':
             return "BUY"
-        elif sell_conditions:
+        if ut_sell and rsi < 50 and candle_color == 'RED':
             return "SELL"
         return "NONE"
 
@@ -295,7 +334,7 @@ class EnhancedTradingStrategy:
         return 0.0
 
     def execute_trade(self, signal: str, analysis: Dict):
-        """Execute trade with adaptive 1.5x ATR(20) SL and $10 TP"""
+        """Execute trade with tighter of ATR SL or UT Trail as stop loss"""
         try:
             tick = mt5.symbol_info_tick(self.symbol)
             if not tick:
@@ -309,20 +348,22 @@ class EnhancedTradingStrategy:
             entry_price = tick.ask if signal == "BUY" else tick.bid
             volume = symbol_info.volume_min
 
-            atr = analysis.get('atr', 0)
+            atr    = analysis.get('atr', 0)
+            ut_sl  = analysis.get('trail_stop', 0)
             sl_distance = atr * self.atr_sl_multiplier
-            tp_distance = self.tp_points
 
             if signal == "BUY":
-                stop_loss = round(entry_price - sl_distance, symbol_info.digits)
-                take_profit = round(entry_price + tp_distance, symbol_info.digits)
-                order_type = mt5.ORDER_TYPE_BUY
+                atr_sl      = entry_price - sl_distance
+                stop_loss   = round(atr_sl, symbol_info.digits)  # ATR SL as broker SL
+                take_profit = round(entry_price + self.tp_points, symbol_info.digits)
+                order_type  = mt5.ORDER_TYPE_BUY
             else:
-                stop_loss = round(entry_price + sl_distance, symbol_info.digits)
-                take_profit = round(entry_price - tp_distance, symbol_info.digits)
-                order_type = mt5.ORDER_TYPE_SELL
+                atr_sl      = entry_price + sl_distance
+                stop_loss   = round(atr_sl, symbol_info.digits)  # ATR SL as broker SL
+                take_profit = round(entry_price - self.tp_points, symbol_info.digits)
+                order_type  = mt5.ORDER_TYPE_SELL
 
-            self.log(f"📐 ATR SL | ATR: {atr:.5f} | x{self.atr_sl_multiplier} = {sl_distance:.5f} | SL: {stop_loss:.5f}")
+            self.log(f"📐 ATR SL (broker): {stop_loss:.5f}")
 
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
@@ -341,13 +382,17 @@ class EnhancedTradingStrategy:
 
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                 self.log(f"✅ {signal} ORDER EXECUTED")
-                self.log(f"   Entry: {entry_price:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
-                self.log(f"   ATR SL: {sl_distance:.5f} | Target: {self.tp_points} Pts | Volume: {volume}")
+                self.log(f"   Entry: {entry_price:.5f} | SL: {stop_loss:.5f} (ATR) | TP: {take_profit:.5f}")
+                # Store bid_at_entry for accurate price_move calculation (entry is ask, bid is lower by spread)
                 self.open_positions[result.order] = {
                     'entry_price': entry_price,
+                    'bid_at_entry': tick.bid if signal == 'BUY' else tick.ask,
+                    'entry_time': datetime.now(),
+                    'take_profit': take_profit,
                     'direction': signal,
                     'breakeven_set': False,
-                    'trailing_set': False
+                    'trailing_set': False,
+                    'ut_trail_at_entry': ut_sl
                 }
             else:
                 self.log(f"❌ ORDER FAILED: {result.comment if result else 'Unknown error'}")
@@ -356,12 +401,11 @@ class EnhancedTradingStrategy:
             self.log(f"❌ Error executing trade: {e}")
 
     def check_exit_conditions(self, analysis: Dict):
-        """Check exit conditions: breakeven + trailing stop loss + angle weakness"""
+        """Check exit conditions: ATR SL safety net + trailing stop + live UT trail exit"""
         positions = mt5.positions_get(symbol=self.symbol)
         if not positions:
             return
 
-        ema_angle = analysis.get('ema_angle', 0)
         tick = mt5.symbol_info_tick(self.symbol)
         if not tick:
             return
@@ -370,62 +414,92 @@ class EnhancedTradingStrategy:
         if not symbol_info:
             return
 
+        live_trail = analysis.get('trail_stop', 0)  # live recalculated UT trail
+        atr = analysis.get('atr', 0)
+        sl_distance = atr * self.atr_sl_multiplier
+
         for pos in positions:
             ticket = pos.ticket
             current_sl = pos.sl
             current_tp = pos.tp
-            profit_usd = pos.profit
-            volume = pos.volume
-            spread = tick.ask - tick.bid
             pos_data = self.open_positions.get(ticket, {'breakeven_set': False, 'trailing_set': False})
 
-            # Restart-safe: detect breakeven already set
-            be_price = round(pos.price_open, symbol_info.digits)
-            if not pos_data.get('breakeven_set') and abs(current_sl - be_price) < symbol_info.point:
-                pos_data['breakeven_set'] = True
+            # Restart-safe: recover ut_trail_at_entry
+            if not pos_data.get('ut_trail_at_entry'):
+                pos_data['ut_trail_at_entry'] = live_trail
                 self.open_positions[ticket] = pos_data
 
-            # --- Breakeven at 3.0 Points ---
-            # BUY filled at ask, SELL filled at bid — measure move from same price type
-            price_move = (tick.ask - pos.price_open) if pos.type == mt5.POSITION_TYPE_BUY else (pos.price_open - tick.bid)
-            
-            if price_move >= self.breakeven_points and not pos_data.get('breakeven_set'):
-                self.log(f"🔒 Breakeven set for #{ticket} | Price Move: {price_move:.2f} Pts | BE SL: {be_price:.5f}")
-                self.modify_position(ticket, be_price, current_tp)
-                pos_data['breakeven_set'] = True
-                self.open_positions[ticket] = pos_data
+            # Fix 1: restart-safe bid_at_entry fallback
+            # BUY fallback: price_open (ask) - spread estimate to get bid equivalent
+            # SELL fallback: price_open (bid) + spread estimate to get ask equivalent
+            spread = tick.ask - tick.bid
+            if pos.type == mt5.POSITION_TYPE_BUY:
+                ask_at_entry = pos_data.get('bid_at_entry', pos.price_open - spread)
+                price_move = tick.bid - ask_at_entry
+                new_sl_candidate = round(tick.bid - self.trailing_gap, symbol_info.digits)
+            else:
+                ask_at_entry = pos_data.get('bid_at_entry', pos.price_open + spread)
+                price_move = ask_at_entry - tick.ask
+                new_sl_candidate = round(tick.ask + self.trailing_gap, symbol_info.digits)
 
-            # --- Trailing Stop at 5.0 Points (trails 2pts behind current price, starts from BE level) ---
+            # Fix 2: ATR SL check FIRST — exit immediately, skip trailing/UT trail
+            if sl_distance > 0:
+                if pos.type == mt5.POSITION_TYPE_BUY:
+                    atr_sl = pos.price_open - sl_distance
+                    if tick.bid <= atr_sl:
+                        self.log(f"🔴 ATR SL Hit BUY #{ticket} | Bid: {tick.bid:.5f} <= ATR SL: {atr_sl:.5f}")
+                        self.close_position(ticket, "ATR SL Exit")
+                        continue
+                else:
+                    atr_sl = pos.price_open + sl_distance
+                    if tick.ask >= atr_sl:
+                        self.log(f"🟢 ATR SL Hit SELL #{ticket} | Ask: {tick.ask:.5f} >= ATR SL: {atr_sl:.5f}")
+                        self.close_position(ticket, "ATR SL Exit")
+                        continue
+
+            # Fix 3: UT Trail Exit — skip for first 10s after entry to avoid immediate close
+            entry_time = pos_data.get('entry_time', None)
+            hold_seconds = (datetime.now() - entry_time).total_seconds() if entry_time else 999
+            if live_trail and hold_seconds >= 10:
+                if pos.type == mt5.POSITION_TYPE_BUY and tick.bid < live_trail:
+                    self.log(f"🔴 UT Trail Exit BUY #{ticket} | Bid: {tick.bid:.5f} < Live Trail: {live_trail:.5f}")
+                    self.close_position(ticket, "UT Trail Exit")
+                    continue
+                elif pos.type == mt5.POSITION_TYPE_SELL and tick.ask > live_trail:
+                    self.log(f"🟢 UT Trail Exit SELL #{ticket} | Ask: {tick.ask:.5f} > Live Trail: {live_trail:.5f}")
+                    self.close_position(ticket, "UT Trail Exit")
+                    continue
+
+            # UT Trail SL Sync - Update broker SL to live UT trail (red dotted line)
+            stored_tp = pos_data.get('take_profit', current_tp)
+            if live_trail and live_trail > 0 and hold_seconds >= 10:
+                ut_sl_rounded = round(live_trail, symbol_info.digits)
+                # Only update if UT trail is better (tighter) than current SL
+                should_update = False
+                if pos.type == mt5.POSITION_TYPE_BUY:
+                    should_update = ut_sl_rounded > current_sl
+                else:
+                    should_update = current_sl == 0 or ut_sl_rounded < current_sl
+                
+                if should_update and abs(ut_sl_rounded - current_sl) >= symbol_info.point:
+                    self.log(f"📍 UT Trail SL Sync #{ticket} | Trail: {ut_sl_rounded:.5f}")
+                    self.modify_position(ticket, ut_sl_rounded, stored_tp)
+                    current_sl = ut_sl_rounded
+
+            # --- Trailing Stop: activates when price_move >= trailing_points ---
             if price_move >= self.trailing_points:
                 if pos.type == mt5.POSITION_TYPE_BUY:
-                    new_sl = tick.bid - self.trailing_gap
-                    if new_sl > current_sl:
-                        self.log(f"🚀 Trailing SL BUY #{ticket} | Move: {price_move:.2f} Pts | New SL: {new_sl:.5f}")
-                        self.modify_position(ticket, new_sl, current_tp)
+                    if new_sl_candidate > current_sl:
+                        self.log(f"🚀 Trailing SL BUY #{ticket} | Bid: {tick.bid:.2f} - {self.trailing_gap} = SL: {new_sl_candidate:.2f}")
+                        self.modify_position(ticket, new_sl_candidate, stored_tp)
                         pos_data['trailing_set'] = True
                         self.open_positions[ticket] = pos_data
-
                 elif pos.type == mt5.POSITION_TYPE_SELL:
-                    new_sl = tick.ask + self.trailing_gap
-                    if new_sl < current_sl:
-                        self.log(f"🚀 Trailing SL SELL #{ticket} | Move: {price_move:.2f} Pts | New SL: {new_sl:.5f}")
-                        self.modify_position(ticket, new_sl, current_tp)
+                    if current_sl == 0 or new_sl_candidate < current_sl:
+                        self.log(f"🚀 Trailing SL SELL #{ticket} | Ask: {tick.ask:.2f} + {self.trailing_gap} = SL: {new_sl_candidate:.2f}")
+                        self.modify_position(ticket, new_sl_candidate, stored_tp)
                         pos_data['trailing_set'] = True
                         self.open_positions[ticket] = pos_data
-
-            # --- SIDEWAY MARKET EXIT (0.0° Angle) ---
-            if ema_angle == 0.0:
-                self.log(f"⏸ SIDEWAY MARKET EXIT #{ticket} | Angle: 0.00° | Closing...")
-                self.close_position(ticket, "SIDEWAY MARKET EXIT")
-                continue
-
-            # --- Angle Weakness Check (Step-based Reversal) ---
-            if pos.type == mt5.POSITION_TYPE_BUY and ema_angle <= -10:
-                self.log(f"📉 Angle Weakness BUY #{ticket} | Angle: {ema_angle:.2f}° | Closing...")
-                self.close_position(ticket, "Angle Weakness Exit")
-            elif pos.type == mt5.POSITION_TYPE_SELL and ema_angle >= 10:
-                self.log(f"📈 Angle Weakness SELL #{ticket} | Angle: {ema_angle:.2f}° | Closing...")
-                self.close_position(ticket, "Angle Weakness Exit")
 
     def modify_position(self, ticket: int, new_sl: float, new_tp: float):
         """Modify position stop loss and take profit"""
@@ -503,15 +577,34 @@ class EnhancedTradingStrategy:
         else:
             status = "WAITING"
 
+
+        trade_info_str = ""
+        if positions:
+            pos0 = positions[0]
+            tick0 = mt5.symbol_info_tick(self.symbol)
+            if tick0:
+                pos0_data = self.open_positions.get(pos0.ticket, {})
+                if pos0.type == mt5.POSITION_TYPE_BUY:
+                    ask_at_entry0 = pos0_data.get('bid_at_entry', pos0.price_open)
+                    pm = tick0.bid - ask_at_entry0
+                    trail_sl_live = round(tick0.bid - self.trailing_gap, 2)
+                else:
+                    ask_at_entry0 = pos0_data.get('bid_at_entry', pos0.price_open)
+                    pm = ask_at_entry0 - tick0.ask
+                    trail_sl_live = round(tick0.ask + self.trailing_gap, 2)
+                trail_status = "ACTIVE" if pm >= self.trailing_points else f"need {self.trailing_points - pm:.2f}more"
+                trade_info_str = f"Move: {pm:.2f}pts | Trail: {trail_status} | TrailSL: {trail_sl_live:.2f} | BrokerSL: {pos0.sl:.2f} | "
+
         # Consolidate log into a single compact line
         log_line = (
             f"Tick#{self.tick_count} | "
             f"Price: {analysis['close']:.2f} | "
-            f"Angle: {analysis['ema_angle']:.2f}° | "
+            f"UTTrail: {analysis['trail_stop']:.2f} | "
             f"RSI: {analysis['rsi']:.1f} | "
-            f"EMA9: {analysis['ema9']:.2f} | "
-            f"EMA21: {analysis['ema21']:.2f} | "
-            f"Status: {status}"
+            f"Candle: {analysis['candle_color']} | "
+            f"UT_Buy: {analysis['ut_buy']} | UT_Sell: {analysis['ut_sell']} | "
+            + trade_info_str
+            + f"Status: {status}"
         )
         self.log(log_line)
 
@@ -541,7 +634,7 @@ if __name__ == "__main__":
         exit()
     
     # Create strategy instance
-    strategy = EnhancedTradingStrategy("XAUUSD", "M5")
+    strategy = EnhancedTradingStrategy("XAUUSD", "M1")
     
     # Run strategy loop
     try:

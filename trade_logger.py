@@ -13,10 +13,12 @@ class TradeLogger:
             with open(self.log_file, 'w', newline='') as file:
                 writer = csv.writer(file)
                 writer.writerow([
-                    'Timestamp', 'Signal', 'Price', 'RSI', 'EMA9', 'EMA21', 
+                    'Timestamp', 'Signal', 'Price', 'RSI',
+                    # 'EMA9', 'EMA21',  # commented out
+                    'Trail_Stop', 'UT_Buy', 'UT_Sell',
                     'Step1', 'Step2', 'Step3', 'Step4', 'Final_Decision',
                     'Entry_Price', 'Stop_Loss', 'Take_Profit', 'Volume',
-                    'Candle_Color', 'Breakout_Valid', 'Volume_Check', 
+                    'Candle_Color', 'Breakout_Valid', 'Volume_Check',
                     'Acceleration_Check', 'Momentum_Check'
                 ])
     
@@ -29,8 +31,11 @@ class TradeLogger:
                 data.get('signal', ''),
                 data.get('price', 0),
                 data.get('rsi', 0),
-                data.get('ema9', 0),
-                data.get('ema21', 0),
+                # data.get('ema9', 0),   # commented out
+                # data.get('ema21', 0),  # commented out
+                data.get('trail_stop', 0),
+                data.get('ut_buy', False),
+                data.get('ut_sell', False),
                 data.get('step1', False),
                 data.get('step2', False),
                 data.get('step3', False),

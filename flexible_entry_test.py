@@ -1,4 +1,5 @@
 import MetaTrader5 as mt5
+import numpy as np
 import time
 from datetime import datetime
 import pytz
@@ -30,8 +31,10 @@ def update_mt5_stop_loss(ticket, new_sl):
         current_tp = position.tp
         current_sl = position.sl
         
-        # Round prices to 5 decimal places for Gold/Forex
-        new_sl = round(float(new_sl), 5)
+        # Round to symbol digits — reuse pos_info already fetched
+        sym_info = mt5.symbol_info(position.symbol)
+        digits = sym_info.digits if sym_info else 5
+        new_sl = round(float(new_sl), digits)
         
         request = {
             'action': mt5.TRADE_ACTION_SLTP,
@@ -55,26 +58,29 @@ def update_mt5_stop_loss(ticket, new_sl):
         print(f"{Colors.RED}[ERROR] SL Update failed unexpectedly: {e}{Colors.RESET}")
         return False
     
-def calculate_trailing_stop_points(pos_type, entry_price, current_price, pos_ticket, logger):
-    """Trailing SL: Activates after 5.0 pts profit, maintains 2.0 pts distance"""
-    price_movement = (current_price - entry_price) if pos_type == "BUY" else (entry_price - current_price)
+def calculate_trailing_stop_points(pos_type, bid_at_entry, current_price, pos_ticket, logger):
+    """Trailing SL: Activates after 1.0 pts profit, maintains 1.0 pts distance"""
+    # bid_at_entry: bid price at time of entry (not ask) for accurate move measurement
+    price_movement = (current_price - bid_at_entry) if pos_type == "BUY" else (bid_at_entry - current_price)
     
     if pos_ticket not in logger.trailing_stop_2dollar:
         logger.trailing_stop_2dollar[pos_ticket] = None
     
     current_sl = logger.trailing_stop_2dollar[pos_ticket]
     
-    # 5.0 Point Activation
-    if price_movement >= 5.0:
+    # 1.0 Point Activation, 1.0 pt gap
+    if price_movement >= 1.0:
         if pos_type == "BUY":
-            new_sl = current_price - 2.0
+            new_sl = current_price - 1.0
             if current_sl is None or new_sl > current_sl:
                 logger.trailing_stop_2dollar[pos_ticket] = new_sl
+                print(f"{Colors.CYAN}[TSL_ACTIVATED] BUY TSL set to {new_sl:.2f} | Price: {current_price:.2f} | Move: +{price_movement:.2f}{Colors.RESET}")
                 return True, new_sl
-        else: # SELL
-            new_sl = current_price + 2.0
+        else:  # SELL
+            new_sl = current_price + 1.0
             if current_sl is None or new_sl < current_sl:
                 logger.trailing_stop_2dollar[pos_ticket] = new_sl
+                print(f"{Colors.CYAN}[TSL_ACTIVATED] SELL TSL set to {new_sl:.2f} | Price: {current_price:.2f} | Move: +{price_movement:.2f}{Colors.RESET}")
                 return True, new_sl
     
     return False, current_sl
@@ -125,18 +131,38 @@ def fetch_candle_history(symbol, strategy, num_candles=10):
     """Fetch last N candles with OHLC and EMA values"""
     import pandas as pd
     
-    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, num_candles + 50)
+    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, num_candles + 50)
     if rates is None or len(rates) < num_candles:
         return []
     
     df = pd.DataFrame(rates)
     df['time'] = pd.to_datetime(df['time'], unit='s')
     
-    # Calculate EMA confirmation for history
-    ema9 = df['close'].ewm(span=9, adjust=False).mean()
-    ema21 = df['close'].ewm(span=21, adjust=False).mean()
+    # --- EMA history commented out (replaced by UT Bot) ---
+    # ema9 = df['close'].ewm(span=9, adjust=False).mean()
+    # ema21 = df['close'].ewm(span=21, adjust=False).mean()
 
-    
+    # UT Bot trailing stop for history display
+    close_arr = df['close'].values
+    high_arr  = df['high'].values
+    low_arr   = df['low'].values
+    n = len(close_arr)
+    atr_arr = np.abs(high_arr - low_arr)
+    trail = np.zeros(n)
+    trail[0] = close_arr[0]
+    for i in range(1, n):
+        n_loss = 2.0 * atr_arr[i]
+        prev_stop  = trail[i - 1]
+        prev_close = close_arr[i - 1]
+        if close_arr[i] > prev_stop and prev_close > prev_stop:
+            trail[i] = max(prev_stop, close_arr[i] - n_loss)
+        elif close_arr[i] < prev_stop and prev_close < prev_stop:
+            trail[i] = min(prev_stop, close_arr[i] + n_loss)
+        elif close_arr[i] > prev_stop:
+            trail[i] = close_arr[i] - n_loss
+        else:
+            trail[i] = close_arr[i] + n_loss
+
     candle_data = []
     for i in range(-num_candles, 0):
         candle_data.append({
@@ -145,15 +171,16 @@ def fetch_candle_history(symbol, strategy, num_candles=10):
             'high': df['high'].iloc[i],
             'low': df['low'].iloc[i],
             'close': df['close'].iloc[i],
-            'ema9': ema9.iloc[i],
-            'ema21': ema21.iloc[i]
+            'trail': trail[i],
+            # 'ema9': ema9.iloc[i],   # commented out
+            # 'ema21': ema21.iloc[i]  # commented out
         })
     
     return candle_data
 
 def display_supertrend_stoploss(strategy, symbol, current_price):
     """Display SuperTrend Stop Loss values prominently"""
-    analysis = strategy.analyze_timeframe('M5')
+    analysis = strategy.analyze_timeframe('M1')
     if not analysis:
         return
     
@@ -280,26 +307,22 @@ def print_one_liner(time_display, tick_count, current_price, candle_color,
                     ema9, ema21, rsi, ema_angle, status, pl_value=None, stop_loss=None):
     price_color = Colors.YELLOW
     candle_col = Colors.GREEN if candle_color == "GREEN" else Colors.RED
-    ema_col = Colors.GREEN if ema9 > ema21 else Colors.RED
     rsi_col = Colors.GREEN if rsi > 50 else Colors.RED
     status_col = Colors.GREEN if "POSITION" in status else Colors.CYAN
+    trail_col = Colors.GREEN if current_price > ema9 else Colors.RED
 
     pl_text = ""
     if pl_value is not None:
         pl_col = Colors.GREEN if pl_value >= 0 else Colors.RED
         pl_text = f" | P/L: {pl_col}${pl_value:.2f}{Colors.RESET}"
 
-    sl_text = f" | {Colors.MAGENTA}ATR SL: {stop_loss:.5f}{Colors.RESET}" if stop_loss else ""
-
-    ang_col = Colors.GREEN if ema_angle >= 15 else (Colors.RED if ema_angle <= -15 else Colors.RESET)
+    sl_text = f" | {Colors.MAGENTA}SL: {stop_loss:.5f}{Colors.RESET}" if stop_loss else ""
 
     print(f"[{time_display}] {Colors.CYAN}Tick#{tick_count}{Colors.RESET} | "
           f"Price: {price_color}{current_price:.5f}{Colors.RESET} | "
-          f"Angle: {ang_col}{ema_angle:+.2f}°{Colors.RESET} | "
+          f"Trail: {trail_col}{ema9:.2f}{Colors.RESET} | "
           f"Candle: {candle_col}{candle_color}{Colors.RESET}{sl_text} | "
           f"{rsi_col}RSI: {rsi:.1f}{Colors.RESET} | "
-          f"EMA9: {ema_col}{ema9:.2f}{Colors.RESET} | "
-          f"EMA21: {ema_col}{ema21:.2f}{Colors.RESET} | "
           f"Status: {status_col}{status}{Colors.RESET}{pl_text}")
 
 
@@ -375,12 +398,13 @@ def print_candle_history_block(candle_history, current_time, logger):
     print(f"{Colors.CYAN}{'═'*80}{Colors.RESET}")
     
     for idx, c in enumerate(candle_history, 1):
-        is_bull = c['ema9'] > c['ema21']
+        # is_bull = c['ema9'] > c['ema21']  # commented out
+        is_bull = c['close'] > c['trail']
         dir_txt = "BULL" if is_bull else "BEAR"
         dir_col = Colors.GREEN if is_bull else Colors.RED
-        
+
         print(f"#{idx:2d} {c['time']} | O:{c['open']:.2f} H:{c['high']:.2f} L:{c['low']:.2f} C:{c['close']:.2f} | "
-              f"EMA9:{dir_col}{c['ema9']:.2f}{Colors.RESET} | EMA21:{c['ema21']:.2f} ({dir_col}{dir_txt}{Colors.RESET})")
+              f"Trail:{dir_col}{c['trail']:.2f}{Colors.RESET} ({dir_col}{dir_txt}{Colors.RESET})")
     
     print(f"{Colors.CYAN}{'═'*80}{Colors.RESET}\n")
 
@@ -494,18 +518,14 @@ class TradeLogger:
         current_range = abs(current_price - current_candle['open'])
         return (current_range / prev_range) * 100
     
-    def calculate_volume(self, current_price):
+    def calculate_volume(self, current_price, atr=None, risk_pct=0.01):
         if not current_price or not self.session_capital:
             return 0
-        
         effective_capital = min(self.session_capital, 5000.0)
-        
         volume = effective_capital / current_price
         volume = round(volume, 2)
-        
         if volume < 0.01:
             return 0
-        
         return volume
 
         
@@ -638,7 +658,7 @@ class TradeLogger:
     
         try:
             # Get recent rates including current forming candle
-            rates = mt5.copy_rates_from_pos("XAUUSD", mt5.TIMEFRAME_M5, 0, 20)
+            rates = mt5.copy_rates_from_pos("XAUUSD", mt5.TIMEFRAME_M1, 0, 20)
             if rates is None or len(rates) < 10:
                 return 0.0
         
@@ -723,7 +743,7 @@ def complete_entry_analysis():
     
     # Initialize components
     symbol = "XAUUSD"
-    strategy = EnhancedTradingStrategy(symbol, "M5")
+    strategy = EnhancedTradingStrategy(symbol, "M1")
            
     # ADD THESE LINES HERE:
     print("\n" + "="*80)
@@ -731,8 +751,9 @@ def complete_entry_analysis():
     print("="*80)
     candle_history = fetch_candle_history(symbol, strategy, 10)
     for idx, c in enumerate(candle_history, 1):
-        trend_txt = "BULL" if c['ema9'] > c['ema21'] else "BEAR"
-        print(f"#{idx} {c['time']} | O:{c['open']:.2f} H:{c['high']:.2f} L:{c['low']:.2f} C:{c['close']:.2f} | EMA9:{c['ema9']:.2f} ({trend_txt})")
+        # trend_txt = "BULL" if c['ema9'] > c['ema21'] else "BEAR"  # commented out
+        ut_dir = "BULL" if c['close'] > c['trail'] else "BEAR"
+        print(f"#{idx} {c['time']} | O:{c['open']:.2f} H:{c['high']:.2f} L:{c['low']:.2f} C:{c['close']:.2f} | Trail:{c['trail']:.2f} ({ut_dir})")
     print("="*80 + "\n")
         
     # Default capital set to $5,000
@@ -742,8 +763,8 @@ def complete_entry_analysis():
     
     print(f"\n[ZERO-LATENCY TRADING SYSTEM ACTIVE]")
     print(f"Symbol: {symbol}")
-    print(f"Entry: BUY(RSI>50 + Green + EMA9>EMA21 + Low>EMA9) | SELL(RSI<50 + Red + EMA9<EMA21 + High<EMA9)")
-    print(f"Exit: 1.5x ATR Adaptive SL | $10 TP | $2 Trailing (after $5 profit) | Breakeven (after $5 profit)")
+    print(f"Entry: BUY(UT_Cross_Up + RSI>50 + GREEN) | SELL(UT_Cross_Down + RSI<50 + RED)")
+    print(f"Exit: 1) Take Profit: 10.0 pts | 2) ATR SL: 1.5x ATR(20) | 3) Trailing: +1.0 pts (1.0 gap) | 4) UT Trail Live Exit")
     print("="*80)
     
     tick_count = 0
@@ -772,20 +793,23 @@ def complete_entry_analysis():
                 }
                 
                 # Get analysis data
-                analysis = strategy.analyze_timeframe("M5")
+                analysis = strategy.analyze_timeframe("M1")
                 if analysis:
                     # Extract indicators
-                    rsi = analysis.get('rsi', 0)
-                    ema9 = analysis.get('ema9', 0)
-                    ema21 = analysis.get('ema21', 0)
-                    atr = analysis.get('atr', 0)
-                    ema_angle = analysis.get('ema_angle', 0)
+                    rsi      = analysis.get('rsi', 0)
+                    atr      = analysis.get('atr', 0)
+                    ut_buy   = analysis.get('ut_buy', False)
+                    ut_sell  = analysis.get('ut_sell', False)
+                    trail_stop = analysis.get('trail_stop', 0)
+                    # ema9      = analysis.get('ema9', 0)       # commented out
+                    # ema21     = analysis.get('ema21', 0)      # commented out
+                    # ema_angle = analysis.get('ema_angle', 0)  # commented out
 
                                       
                      
                     # Get current candle data + intra-candle analysis
                     
-                    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 3)
+                    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 3)
                     if rates is not None and len(rates) >= 2:
                         current_candle = rates[-1]
                         previous_candle = rates[-2]
@@ -830,11 +854,17 @@ def complete_entry_analysis():
                         # Define existing_positions early
                         existing_positions = mt5.positions_get(symbol=symbol)
 
-                        # BUY Condition: RSI(14) > 50, EMA 9 > EMA 21, Green Candle, Candle Low > EMA 9 + Angle >= 15
-                        if rsi > 50 and ema9 > ema21 and current_candle_color == "GREEN" and current_candle['low'] > ema9 and ema_angle >= 15:
+                        # --- EMA entry conditions commented out ---
+                        # if rsi > 50 and ema9 > ema21 and current_candle_color == "GREEN" and current_candle['low'] > ema9 and ema_angle >= 15:
+                        #     structure_signal = "BUY"
+                        # elif rsi < 50 and ema9 < ema21 and current_candle_color == "RED" and current_candle['high'] < ema9 and ema_angle <= -15:
+                        #     structure_signal = "SELL"
+
+                        # --- UT Bot entry conditions (ALL 3 must be true) ---
+                        close_price = current_price
+                        if ut_buy and rsi > 50 and current_candle_color == "GREEN":
                             structure_signal = "BUY"
-                        # SELL Condition: RSI(14) < 50, EMA 9 < EMA 21, Red Candle, Candle High < EMA 9 + Angle <= -15
-                        elif rsi < 50 and ema9 < ema21 and current_candle_color == "RED" and current_candle['high'] < ema9 and ema_angle <= -15:
+                        elif ut_sell and rsi < 50 and current_candle_color == "RED":
                             structure_signal = "SELL"
                                             
                         # Current candle direction confirmation (already covered by candle color check)
@@ -845,7 +875,7 @@ def complete_entry_analysis():
                         if not existing_positions and structure_signal:
                             signal = structure_signal
                             entry_conditions_met = True
-                            print(f"[SIGNAL] {signal} | RSI:{rsi:.1f} | Candle:{current_candle_color} | EMA9:{ema9:.2f} | EMA21:{ema21:.2f} | Low:{current_candle['low']:.2f} | High:{current_candle['high']:.2f}")
+                            print(f"[SIGNAL] {signal} | RSI:{rsi:.1f} | Trail:{trail_stop:.2f} | Candle:{current_candle_color} | Low:{current_candle['low']:.2f} | High:{current_candle['high']:.2f}")
                         else:
                             signal = "NONE"
                             entry_conditions_met = False
@@ -862,9 +892,9 @@ def complete_entry_analysis():
                             if volume > 0:
                                 order_ready = True
                                 if signal == "BUY":
-                                    trade_entry_price = market_data['ask'] + tick_size
+                                    trade_entry_price = market_data['ask']
                                 else:  # SELL
-                                    trade_entry_price = market_data['bid'] - tick_size
+                                    trade_entry_price = market_data['bid']
                             else:
                                 order_ready = False
                                 trade_entry_price = 0
@@ -893,26 +923,42 @@ def complete_entry_analysis():
                                     exit_reasons = []
                                     
                                     # === 1. Calculate Price Movement in Points ===
-                                    price_movement = (current_price - pos.price_open) if pos_type == "BUY" else (pos.price_open - current_price)
+                                    # Use bid_at_entry for accurate move (avoids spread distortion)
+                                    if not hasattr(logger, 'bid_at_entry'):
+                                        logger.bid_at_entry = {}
+                                    bid_entry = logger.bid_at_entry.get(pos_ticket, pos.price_open)
+                                    if pos_type == "BUY":
+                                        price_movement = tick.bid - bid_entry
+                                    else:
+                                        price_movement = bid_entry - tick.ask
                                     spread = tick.ask - tick.bid
                                     
-                                    # === 2. BREAKEVEN: After 3.0 POINT price move ===
-                                    if price_movement >= 3.0 and pos_ticket not in logger.breakeven_5dollar_activated:
-                                        be_sl = round(pos.price_open + spread, 5) if pos_type == "BUY" else round(pos.price_open - spread, 5)
-                                        logger.breakeven_5dollar_activated[pos_ticket] = be_sl
-                                        update_mt5_stop_loss(pos_ticket, be_sl)
-                                        print(f"{Colors.GREEN}[BREAKEVEN SET] MT5 SL moved after +3.0 Pt move{Colors.RESET}")
+                                    # === 2. BREAKEVEN: After 3.0 POINT price move === (commented out)
+                                    # if price_movement >= 3.0 and pos_ticket not in logger.breakeven_5dollar_activated:
+                                    #     digits = mt5.symbol_info(symbol).digits if mt5.symbol_info(symbol) else 5
+                                    #     be_sl = round(pos.price_open, digits)
+                                    #     logger.breakeven_5dollar_activated[pos_ticket] = be_sl
+                                    #     update_mt5_stop_loss(pos_ticket, be_sl)
+                                    #     print(f"{Colors.GREEN}[BREAKEVEN SET] MT5 SL moved to entry {be_sl:.5f} after +3.0 Pt move{Colors.RESET}")
 
-                                    # === 3. TRAILING STOP: Activates at 5.0 pts profit ===
-                                    tsl_moved, tsl_value = calculate_trailing_stop_points(pos_type, pos.price_open, current_price, pos_ticket, logger)
+                                    # === 3. TRAILING STOP: Activates at 2.0 pts profit ===
+                                    prev_tsl = logger.trailing_stop_2dollar.get(pos_ticket)  # value BEFORE update
+                                    tsl_price = tick.bid if pos_type == "BUY" else tick.ask
+                                    # Use bid_at_entry(BUY=bid, SELL=ask) for accurate move
+                                    if not hasattr(logger, 'bid_at_entry'):
+                                        logger.bid_at_entry = {}
+                                    spread = tick.ask - tick.bid
+                                    default_entry = pos.price_open - spread if pos_type == "BUY" else pos.price_open + spread
+                                    bid_entry = logger.bid_at_entry.get(pos_ticket, default_entry)
+                                    tsl_moved, tsl_value = calculate_trailing_stop_points(pos_type, bid_entry, tsl_price, pos_ticket, logger)
                                     if tsl_moved:
                                         update_mt5_stop_loss(pos_ticket, tsl_value)
-                                    
-                                    # Check for Trailing Stop Exit hit
-                                    if tsl_value is not None:
-                                        if pos_type == "BUY" and current_price <= tsl_value:
+
+                                    # Check for Trailing Stop Exit hit (only against previously confirmed SL, not the new one)
+                                    if prev_tsl is not None:
+                                        if pos_type == "BUY" and current_price <= prev_tsl:
                                             exit_reasons.append(f"2.0 Pt Trailing Stop Hit")
-                                        elif pos_type == "SELL" and current_price >= tsl_value:
+                                        elif pos_type == "SELL" and current_price >= prev_tsl:
                                             exit_reasons.append(f"2.0 Pt Trailing Stop Hit")
 
                                     # === 4. TARGET PROFIT: After 10.0 POINT price move ===
@@ -920,26 +966,56 @@ def complete_entry_analysis():
                                     if tp_exit:
                                         exit_reasons.append(tp_reason)
 
-                                    # === 5. OTHER EXITS (ATR, EMA, Angle) ===
+                                    # === 4b. SYNC BROKER SL TO LIVE UT TRAIL (red dotted line on MT5 chart) ===
+                                    # Only sync when trail value changes — avoid spamming MT5 every tick
+                                    if not hasattr(logger, 'last_synced_trail'):
+                                        logger.last_synced_trail = {}
+                                    if trail_stop and trail_stop > 0 and symbol_info:
+                                        ut_sl_rounded = round(trail_stop, symbol_info.digits)
+                                        last_synced = logger.last_synced_trail.get(pos_ticket, 0)
+                                        if abs(ut_sl_rounded - last_synced) >= symbol_info.point:
+                                            print(f"{Colors.MAGENTA}[UT_TRAIL_SYNC] #{pos_ticket} | Trail: {ut_sl_rounded:.5f}{Colors.RESET}")
+                                            if update_mt5_stop_loss(pos_ticket, ut_sl_rounded):
+                                                logger.last_synced_trail[pos_ticket] = ut_sl_rounded
+
+                                    # === 5. UT TRAIL EXIT (frozen at entry) — skip if TSL already active ===
+                                    ut_trail_at_entry = logger.position_entry_prices.get(pos_ticket, {}) if isinstance(logger.position_entry_prices.get(pos_ticket), dict) else None
+                                    if pos_ticket not in logger.position_entry_prices or not isinstance(logger.position_entry_prices.get(pos_ticket), dict):
+                                        pass
+                                    ut_entry_trail = getattr(logger, 'ut_trail_at_entry', {}).get(pos_ticket, 0)
+                                    if not ut_entry_trail:
+                                        if not hasattr(logger, 'ut_trail_at_entry'):
+                                            logger.ut_trail_at_entry = {}
+                                        logger.ut_trail_at_entry[pos_ticket] = trail_stop
+                                        ut_entry_trail = trail_stop
+                                    # UT Trail Exit uses LIVE trail — always active regardless of TSL
+                                    if trail_stop:
+                                        if pos_type == "BUY" and tick.bid < trail_stop:
+                                            exit_reasons.append(f"UT Trail Exit (Trail: {trail_stop:.2f})")
+                                        elif pos_type == "SELL" and tick.ask > trail_stop:
+                                            exit_reasons.append(f"UT Trail Exit (Trail: {trail_stop:.2f})")
+
+                                    # === 6. OTHER EXITS (ATR, EMA, Angle) ===
                                     sl_exit, sl_reason = check_adaptive_atr_stoploss(pos, current_price, atr)
                                     if sl_exit: exit_reasons.append(sl_reason)
 
                                     pp_exit, pp_reason = check_profit_protection(pos, current_price, logger)
                                     if pp_exit: exit_reasons.append(pp_reason)
 
-                                    if (pos_type == "BUY" and ema21 > ema9) or (pos_type == "SELL" and ema9 > ema21):
-                                        exit_reasons.append("EMA Crossover Exit")
-
-                                    if ema_angle == 0.0:
-                                        exit_reasons.append("SIDEWAY MARKET EXIT")
-
-                                    if (pos_type == "BUY" and ema_angle <= -10) or (pos_type == "SELL" and ema_angle >= 10):
-                                        exit_reasons.append("Angle Weakness Exit")
+                                    # --- EMA exit conditions commented out ---
+                                    # if (pos_type == "BUY" and ema21 > ema9) or (pos_type == "SELL" and ema9 > ema21):
+                                    #     exit_reasons.append("EMA Crossover Exit")
+                                    # if ema_angle == 0.0:
+                                    #     exit_reasons.append("SIDEWAY MARKET EXIT")
+                                    # if (pos_type == "BUY" and ema_angle <= -10) or (pos_type == "SELL" and ema_angle >= 10):
+                                    #     exit_reasons.append("Angle Weakness Exit")
                                     
                                     # === EXECUTE EXIT IF ANY CONDITION MET ===
                                     if exit_reasons:
+                                        # Capture profit BEFORE closing (pos.profit becomes 0 after close)
+                                        captured_profit = pos.profit
+
                                         sym_info = mt5.symbol_info(symbol)
-                                        # Use bitmask directly if SYMBOL_FILLING constants are missing in this MT5 version
                                         SYMBOL_FILLING_FOK = getattr(mt5, 'SYMBOL_FILLING_FOK', 1)
                                         SYMBOL_FILLING_IOC = getattr(mt5, 'SYMBOL_FILLING_IOC', 2)
                                         
@@ -953,24 +1029,29 @@ def complete_entry_analysis():
                                                 exit_filling = mt5.ORDER_FILLING_RETURN
                                         
                                         close_type = mt5.ORDER_TYPE_SELL if pos_type == "BUY" else mt5.ORDER_TYPE_BUY
+                                        close_price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
                                         result = mt5.order_send({
                                             'action': mt5.TRADE_ACTION_DEAL,
                                             'symbol': symbol,
                                             'volume': pos.volume,
                                             'type': close_type,
                                             'position': pos.ticket,
+                                            'price': close_price,
                                             'type_filling': exit_filling,
                                             'magic': 123456
                                         })
-                                        
+
+                                        # Log exit with captured profit
+                                        logger.log_exit(captured_profit)
+
                                         # Calculate duration
                                         entry_time = logger.last_trade_time
                                         exit_time = datetime.now()
                                         duration = str(exit_time - entry_time).split('.')[0] if entry_time else "Unknown"
                                         
                                         # Calculate win rate
-                                        total = logger.winning_trades + logger.losing_trades + (1 if pos.profit >= 0 else 0)
-                                        win_rate = ((logger.winning_trades + (1 if pos.profit >= 0 else 0)) / total * 100) if total > 0 else 0
+                                        total = logger.winning_trades + logger.losing_trades
+                                        win_rate = (logger.winning_trades / total * 100) if total > 0 else 0
                                         
                                         # Print trade exit block
                                         print_trade_exit(
@@ -980,17 +1061,14 @@ def complete_entry_analysis():
                                             entry_price=pos.price_open,
                                             exit_price=current_price,
                                             duration=duration,
-                                            profit_loss=pos.profit,
+                                            profit_loss=captured_profit,
                                             exit_reasons=exit_reasons,
                                             total_trades=logger.trades_executed,
                                             win_rate=win_rate,
-                                            wins=logger.winning_trades + (1 if pos.profit >= 0 else 0),
-                                            losses=logger.losing_trades + (1 if pos.profit < 0 else 0),
-                                            capital=logger.current_capital + pos.profit,
+                                            wins=logger.winning_trades,
+                                            losses=logger.losing_trades,
+                                            capital=logger.current_capital,
                                         )
-                                        
-                                    
-                                        logger.log_exit(pos.profit)
                                         
                                         # Only reset for trailing stop exits, not trend reversals or other exits
                                         if any("Trailing Stop" in reason for reason in exit_reasons):
@@ -1031,6 +1109,12 @@ def complete_entry_analysis():
                                             del logger.target_profit_hit[pos_ticket]
                                         if pos_ticket in logger.breakeven_5dollar_activated:
                                             del logger.breakeven_5dollar_activated[pos_ticket]
+                                        if hasattr(logger, 'ut_trail_at_entry') and pos_ticket in logger.ut_trail_at_entry:
+                                            del logger.ut_trail_at_entry[pos_ticket]
+                                        if hasattr(logger, 'bid_at_entry') and pos_ticket in logger.bid_at_entry:
+                                            del logger.bid_at_entry[pos_ticket]
+                                        if hasattr(logger, 'last_synced_trail') and pos_ticket in logger.last_synced_trail:
+                                            del logger.last_synced_trail[pos_ticket]
 
 
 
@@ -1057,19 +1141,17 @@ def complete_entry_analysis():
                             pl_value = None
 
 
-                        # Get active SL for display (Priority: 1. Trailing, 2. Breakeven, 3. Base ATR SL)
+                        # Get active SL for display (Priority: 1. Trailing, 2. Base ATR SL)
                         active_sl_display = None
                         if existing_positions:
                             pos = existing_positions[0]
                             pos_ticket = pos.ticket
                             pos_type = "BUY" if pos.type == 0 else "SELL"
-                            
-                            if pos_ticket in logger.trailing_stop_2dollar and logger.trailing_stop_2dollar[pos_ticket] is not None:
-                                active_sl_display = logger.trailing_stop_2dollar[pos_ticket]
-                            elif pos_ticket in logger.breakeven_5dollar_activated:
-                                active_sl_display = logger.breakeven_5dollar_activated[pos_ticket]
+
+                            tsl = logger.trailing_stop_2dollar.get(pos_ticket)
+                            if tsl is not None:
+                                active_sl_display = tsl
                             else:
-                                # Calculate current base ATR SL (1.5x multiplier)
                                 entry_p = pos.price_open
                                 active_sl_display = (entry_p - (atr * 1.5)) if pos_type == "BUY" else (entry_p + (atr * 1.5))
 
@@ -1079,10 +1161,10 @@ def complete_entry_analysis():
                             tick_count=tick_count,
                             current_price=current_price,
                             candle_color=current_candle_color,
-                            ema9=ema9,
-                            ema21=ema21,
+                            ema9=trail_stop,   # repurposed: shows trail stop value
+                            ema21=trail_stop,  # repurposed: shows trail stop value
                             rsi=rsi,
-                            ema_angle=ema_angle,
+                            ema_angle=0.0,     # commented out — no angle
                             status=status,
                             pl_value=pl_value,
                             stop_loss=active_sl_display
@@ -1101,7 +1183,7 @@ def complete_entry_analysis():
                             logger.executing_trade = True  # Lock immediately
     
                             try:
-                                volume = logger.calculate_volume(current_price)
+                                volume = logger.calculate_volume(current_price, atr=atr)
                                 if volume > 0:
                                     symbol_info = mt5.symbol_info(symbol)
                                     # Use bitmask directly if SYMBOL_FILLING constants are missing in this MT5 version
@@ -1122,17 +1204,21 @@ def complete_entry_analysis():
                                     tp_dist = 10.0
                                     
                                     if signal == 'BUY':
-                                        sl_price = round(current_price - (atr * 1.5), digits)
+                                        atr_sl   = current_price - (atr * 1.5)
+                                        sl_price = round(trail_stop, digits)  # UT Trail prev candle = broker SL
                                         tp_price = round(current_price + tp_dist, digits)
                                     else:
-                                        sl_price = round(current_price + (atr * 1.5), digits)
+                                        atr_sl   = current_price + (atr * 1.5)
+                                        sl_price = round(trail_stop, digits)  # UT Trail prev candle = broker SL
                                         tp_price = round(current_price - tp_dist, digits)
+                                    print(f"[SL] UT Trail SL: {sl_price:.5f} | ATR SL (safety net): {atr_sl:.5f}")
 
                                     result = mt5.order_send({
                                         'action': mt5.TRADE_ACTION_DEAL,
                                         'symbol': symbol,
                                         'volume': volume,
                                         'type': mt5.ORDER_TYPE_BUY if signal == 'BUY' else mt5.ORDER_TYPE_SELL,
+                                        'price': current_price,
                                         'sl': sl_price,
                                         'tp': tp_price,
                                         'type_filling': filling,
@@ -1150,6 +1236,15 @@ def complete_entry_analysis():
                                             logger.position_entry_prices[pos_ticket] = result.price
                                             logger.position_entry_direction[pos_ticket] = signal
                                             logger.position_entry_candle[pos_ticket] = current_candle_time
+                                            # Store bid_at_entry for accurate price_move (avoids spread distortion)
+                                            if not hasattr(logger, 'bid_at_entry'):
+                                                logger.bid_at_entry = {}
+                                            # BUY: store tick.bid | SELL: store tick.ask
+                                            logger.bid_at_entry[pos_ticket] = tick.bid if signal == 'BUY' else tick.ask
+                                            # Store UT trail frozen at entry
+                                            if not hasattr(logger, 'ut_trail_at_entry'):
+                                                logger.ut_trail_at_entry = {}
+                                            logger.ut_trail_at_entry[pos_ticket] = trail_stop
                                             
                                             # Print trade entry block
                                             print_trade_entry(
@@ -1182,7 +1277,38 @@ def complete_entry_analysis():
 
     except KeyboardInterrupt:
         print(f"\n\nSystem stopped by user")
-        print(logger.get_stats())
+        # Fetch real stats from MT5 trade history — current session only
+        from datetime import timezone
+        session_start = datetime.fromtimestamp(start_time, tz=timezone.utc)
+        history = mt5.history_deals_get(session_start, datetime.now(timezone.utc))
+        if history:
+            bot_deals = [d for d in history if d.magic == 123456 and d.entry == 1]  # entry=1 = closing deals
+            wins   = [d for d in bot_deals if d.profit > 0]
+            losses = [d for d in bot_deals if d.profit < 0]
+            total_profit = sum(d.profit for d in bot_deals)
+            win_rate = (len(wins) / len(bot_deals) * 100) if bot_deals else 0
+            print(f"\nPROFIT CAPTURE STATISTICS:")
+            print(f"   Total Trades:  {len(bot_deals)}")
+            print(f"   Total Profit:  ${total_profit:.2f}")
+            print(f"   Win Rate:      {win_rate:.1f}% ({len(wins)}W/{len(losses)}L)")
+            print(f"   Total Win Amt: ${sum(d.profit for d in wins):.2f}")
+            print(f"   Total Loss Amt:${sum(d.profit for d in losses):.2f}")
+            print(f"   Largest Win:   ${max((d.profit for d in wins), default=0):.2f}")
+            print(f"   Largest Loss:  ${min((d.profit for d in losses), default=0):.2f}")
+            print(f"   Avg Win:       ${(sum(d.profit for d in wins) / len(wins)):.2f}" if wins else f"   Avg Win:       $0.00")
+            print(f"   Avg Loss:      ${(sum(d.profit for d in losses) / len(losses)):.2f}" if losses else f"   Avg Loss:      $0.00")
+            total_wins_sum = sum(d.profit for d in wins)
+            total_loss_sum = abs(sum(d.profit for d in losses))
+            rr = (total_wins_sum / total_loss_sum) if total_loss_sum > 0 else float('inf')
+            print(f"   Risk/Reward:   {rr:.2f}")
+            session_mins = (time.time() - start_time) / 60
+            print(f"   Session Time:  {int(session_mins)}m {int((session_mins % 1) * 60)}s")
+            account = mt5.account_info()
+            if account:
+                print(f"   Balance:       ${account.balance:.2f}")
+                print(f"   Equity:        ${account.equity:.2f}")
+        else:
+            print(logger.get_stats())
     finally:
         mt5.shutdown()
 

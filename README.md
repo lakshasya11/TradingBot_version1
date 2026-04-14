@@ -1,98 +1,95 @@
-# EMA Trading Bot
+# UT Bot Trading Strategy
 
-An automated MetaTrader 5 trading bot using EMA crossover, RSI, SuperTrend, and EMA Angle indicators for forex and gold trading.
+An automated MetaTrader 5 trading bot using UT Bot ATR Trailing Stop, RSI, and candle color confirmation for forex and gold trading.
 
 ## Features
 
-- **EMA Crossover Signals**: 9 and 21 period EMA analysis
-- **RSI Filter**: 14-period RSI for momentum confirmation
-- **SuperTrend Confirmation**: ATR-based trend direction filter
-- **EMA Angle Filter**: Live EMA(9) angle calculated from tick data for trend strength
-- **ATR-Based Risk Management**: Dynamic stop loss using Average True Range
-- **Trailing Stop + Breakeven**: Automatic position management after profit threshold
-- **Multi-Timeframe Mode**: Optional unanimous consensus across 6 timeframes (1M, 5M, 15M, 30M, 1H, 1D)
+- **UT Bot ATR Trailing Stop**: Key_Value=2.0, ATR_Period=1 (single candle range) for dynamic trend detection
+- **RSI Filter**: 14-period RSI (Wilder's smoothing) for momentum confirmation
+- **Candle Color Confirmation**: Green/Red candle required to confirm entry direction
+- **ATR-Based Stop Loss**: 1.5x ATR(20) or UT Trail — whichever is closer to entry price
+- **Trailing Stop**: Activates after +1.0 points move, trails 1.0 points behind price
+- **UT Trail Live Exit**: Position closed if price crosses back through the live UT trail
+
+---
 
 ## How the Bot Works
 
 The bot runs in a continuous loop (every 1 second) and performs the following on each cycle:
 
-1. Fetches the latest OHLCV candle data from MT5
-2. Calculates RSI(14), EMA(9), EMA(21), ATR(14), and live EMA Angle
+1. Fetches the latest OHLCV candle data from MT5 (M1 timeframe by default)
+2. Calculates RSI(14), ATR(20), and UT Bot ATR Trailing Stop
 3. Evaluates entry conditions against the latest candle
 4. If a signal is found and no position is open, executes a market order
-5. Monitors open positions and applies breakeven + trailing stop + angle weakness exit logic
+5. Monitors open positions and applies trailing stop + UT trail live exit logic
 
 ---
 
 ## Entry Conditions
 
 ### BUY Signal
-All 5 conditions must be true:
-- RSI(14) > 50
-- EMA(9) > EMA(21)
+All 3 conditions must be true:
+- Price is **above** UT Bot trailing stop (`ut_buy = True`)
+- RSI(14) **> 50**
 - Current candle is **Green** (close > open)
-- Candle **Low** is above EMA(9)
-- Live EMA(9) Angle **>= +15°**
 
 ### SELL Signal
-All 5 conditions must be true:
-- RSI(14) < 50
-- EMA(9) < EMA(21)
+All 3 conditions must be true:
+- Price is **below** UT Bot trailing stop (`ut_sell = True`)
+- RSI(14) **< 50**
 - Current candle is **Red** (close < open)
-- Candle **High** is below EMA(9)
-- Live EMA(9) Angle **<= -15°**
 
 > Only one position per symbol is allowed at a time.
 
-> **EMA Angle** is calculated live by blending the current tick price into EMA(9) and converting the slope to degrees.
+---
+
+## UT Bot ATR Trailing Stop Calculation
+
+- ATR Period = 1 (single candle high-low range)
+- Key Value = 2.0 (multiplier)
+- `n_loss = 2.0 × |high - low|`
+- Trail ratchets up in uptrend, down in downtrend
+- `ut_buy` = price > trail | `ut_sell` = price < trail
 
 ---
 
 ## Exit Conditions
 
 ### Stop Loss
-- Placed at **2.0x ATR(14)** distance from entry price
-- BUY: `entry - (2.0 × ATR)`
-- SELL: `entry + (2.0 × ATR)`
+- Uses the **tighter** of:
+  - ATR SL: `1.5 × ATR(20)` from entry price
+  - UT Trail value at entry
+- BUY: `max(entry - ATR_SL, ut_trail)` → higher value = closer to entry
+- SELL: `min(entry + ATR_SL, ut_trail)` → lower value = closer to entry
 
 ### Take Profit
 - Fixed at **10.0 points** distance from entry price
 - BUY: `entry + 10.0 pts`
 - SELL: `entry - 10.0 pts`
 
-### Breakeven
-- Once price moves **+3.0 points** from entry, stop loss is moved to entry price (breakeven)
-
 ### Trailing Stop
-- Activates after price moves **+5.0 points** from entry
-- Trails **2.0 points** behind the current price
-- BUY: `current bid - 2.0 pts` (only moves up)
-- SELL: `current ask + 2.0 pts` (only moves down)
+- Activates after price moves **+1.0 points** from entry (bid-to-bid for BUY, ask-to-ask for SELL)
+- Trails **1.0 points** behind the current price
+- BUY: `current bid - 1.0 pts` (only moves up)
+- SELL: `current ask + 1.0 pts` (only moves down)
 
-### Sideway Market Exit
-- If live EMA(9) Angle == **0.0°**, position is closed immediately (flat/sideways market detected)
+### UT Trail Live Exit
+- BUY position: closed if `tick.bid < live UT trail`
+- SELL position: closed if `tick.ask > live UT trail`
 
-### Angle Weakness Exit
-- BUY position: closed if EMA Angle drops to **<= -10°** (momentum reversal)
-- SELL position: closed if EMA Angle rises to **>= +10°** (momentum reversal)
+### ATR SL Safety Net
+- Manual price check as backup if broker SL fails
+- BUY: closed if `tick.bid <= entry - (1.5 × ATR)`
+- SELL: closed if `tick.ask >= entry + (1.5 × ATR)`
 
 ---
 
-## Multi-Timeframe Mode (`triple_strategy.py`)
+## Live Log Format
 
-An alternative stricter mode that requires **unanimous agreement across all 6 timeframes** (1M, 5M, 15M, 30M, 1H, 1D):
-
-### BUY (all 6 TFs must agree):
-- RSI(14) > 50
-- SuperTrend direction = Bullish
-- EMA(9) > EMA(21)
-
-### SELL (all 6 TFs must agree):
-- RSI(14) < 40
-- SuperTrend direction = Bearish
-- EMA(9) < EMA(21)
-
-Stop loss uses **1.5x ATR(14)** from the 15M timeframe. Take profit is set at **10.0 points** distance.
+Each tick outputs a single compact line:
+```
+[HH:MM:SS.mmm] Tick#N | Price: X | UTTrail: X | RSI: X | Candle: GREEN/RED | UT_Buy: T/F | UT_Sell: T/F | Move: Xpts | Trail: ACTIVE/need Xmore | TrailSL: X | BrokerSL: X | Status: IN_TRADE/SIGNAL/WAITING
+```
 
 ---
 
@@ -124,11 +121,31 @@ python enhanced_strategy.py
 
 ---
 
+## Key Parameters (in `__init__`)
+
+| Parameter | Value | Description |
+|---|---|---|
+| `atr_sl_multiplier` | 1.5 | ATR stop loss distance multiplier |
+| `tp_points` | 10.0 | Take profit in points |
+| `trailing_points` | 1.0 | Points move needed to activate trailing stop |
+| `trailing_gap` | 1.0 | Points trail behind current price |
+
+## UT Bot Parameters
+
+| Parameter | Value | Description |
+|---|---|---|
+| `key_value` | 2.0 | UT Bot ATR multiplier |
+| `atr_period` | 1 | ATR period (single candle range) |
+| `rsi_period` | 14 | RSI calculation period |
+| `atr_sl_period` | 20 | ATR period for stop loss calculation |
+
+---
+
 ## File Structure
 
 ```
-Trading_forex/
-├── enhanced_strategy.py        # Main bot (EMA + RSI + ATR + Angle strategy)
+TradingBot_EMA_version-2/
+├── enhanced_strategy.py        # Main bot (UT Bot + RSI + ATR strategy)
 ├── trade_backend/
 │   ├── triple_strategy.py      # Multi-timeframe consensus strategy
 │   ├── mt5_api_bridge.py       # MT5 API bridge

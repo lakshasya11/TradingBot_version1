@@ -22,7 +22,7 @@ def main():
         return
 
     # Connect to MT5 terminal
-    if not mt5.initialize():
+    if not mt5.initialize(path=mt5_path, login=int(mt5_login), password=mt5_pass, server=mt5_server):
         print(f"MT5 initialization FAILED! Error Code: {mt5.last_error()}")
         return
     

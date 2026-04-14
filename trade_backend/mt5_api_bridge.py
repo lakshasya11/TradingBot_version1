@@ -14,11 +14,15 @@ app = Flask(__name__)
 CORS(app) 
 
 # --- MT5 Connection Handler ---
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
 def init_mt5_connection():
-    MT5_PATH = "C:/Program Files/MetaTrader 5/terminal64.exe" 
-    LOGIN_ID = 213711922
-    PASSWORD = "j6t#UeuH" 
-    SERVER = "OctaFX-Demo" 
+    MT5_PATH = os.getenv("MT5_PATH", "C:/Program Files/MetaTrader 5/terminal64.exe")
+    LOGIN_ID = int(os.getenv("MT5_LOGIN"))
+    PASSWORD = os.getenv("MT5_PASSWORD")
+    SERVER   = os.getenv("MT5_SERVER")
     if not mt5.initialize(path=MT5_PATH, login=LOGIN_ID, password=PASSWORD, server=SERVER):
         error_code = mt5.last_error()
         print(f"MT5 initialize() FAILED! Error Code: {error_code}. Ensure terminal is running.")
