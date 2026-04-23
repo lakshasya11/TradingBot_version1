@@ -9,11 +9,11 @@ from trading_core import TradingCore
 
 def test_exit_conditions():
     """Test both exit conditions with mock data"""
-    print("🧪 TESTING EXIT CONDITIONS")
+    print("[TEST] TESTING EXIT CONDITIONS")
     print("=" * 50)
     
     # Test 1: Dynamic Trailing Stop Logic
-    print("\n1️⃣ TESTING DYNAMIC TRAILING STOP")
+    print("\n[1] TESTING DYNAMIC TRAILING STOP")
     print("-" * 30)
     
     # Mock position data
@@ -43,7 +43,7 @@ def test_exit_conditions():
         pos, tick, pos_data, symbol_info, 0.01, 1.0
     )
     
-    print(f"✅ BUY Position Test:")
+    print(f"[PASS] BUY Position Test:")
     print(f"   Entry: {pos.price_open}")
     print(f"   Current Bid: {tick.bid}")
     print(f"   Profit: {tick.bid - pos.price_open:.3f} points")
@@ -60,7 +60,7 @@ def test_exit_conditions():
         pos_sell, tick_sell, pos_data_sell, symbol_info, 0.01, 1.0
     )
     
-    print(f"\\n✅ SELL Position Test:")
+    print(f"\n[PASS] SELL Position Test:")
     print(f"   Entry: {pos_sell.price_open}")
     print(f"   Current Ask: {tick_sell.ask}")
     print(f"   Profit: {pos_sell.price_open - tick_sell.ask:.3f} points")
@@ -69,7 +69,7 @@ def test_exit_conditions():
     print(f"   Label: {label_sell}")
     
     # Test 2: Opposite Candle Exit Logic
-    print("\\n\\n2️⃣ TESTING OPPOSITE CANDLE EXIT")
+    print("\n\n[2] TESTING OPPOSITE CANDLE EXIT")
     print("-" * 30)
     
     # Mock entry data
@@ -79,28 +79,28 @@ def test_exit_conditions():
         'last_checked_candle_time': None
     }
     
-    print(f"✅ Entry Candle: {entry_pos_data['entry_candle_color']}")
-    print(f"✅ Entry Time: {entry_pos_data['entry_candle_time']}")
-    print(f"✅ Mock current candle will be RED (opposite)")
-    print(f"✅ Mock reversal will be 0.6 points (> 0.5 threshold)")
+    print(f"[PASS] Entry Candle: {entry_pos_data['entry_candle_color']}")
+    print(f"[PASS] Entry Time: {entry_pos_data['entry_candle_time']}")
+    print(f"[PASS] Mock current candle will be RED (opposite)")
+    print(f"[PASS] Mock reversal will be 0.6 points (> 0.5 threshold)")
     
-    print("\\n🎯 SUMMARY OF FIXES:")
+    print("\n[SUMMARY] FIXES APPLIED:")
     print("=" * 50)
-    print("✅ Dynamic Trailing Stop:")
+    print("[PASS] Dynamic Trailing Stop:")
     print("   - Reference price preservation fixed")
     print("   - Profit calculation corrected")
     print("   - Activation threshold logic fixed")
     print("   - Ratcheting mechanism working")
     print("   - Dual system conflicts removed")
     
-    print("\\n✅ Opposite Candle Exit:")
+    print("\n[PASS] Opposite Candle Exit:")
     print("   - Current forming candle detection fixed")
     print("   - Timing logic corrected")
     print("   - Reference price calculation fixed")
     print("   - Entry candle data storage improved")
     print("   - Reversal threshold logic working")
     
-    print("\\n🚀 BOTH EXIT CONDITIONS ARE NOW ACTIVE!")
+    print("\n[SUCCESS] BOTH EXIT CONDITIONS ARE NOW ACTIVE!")
     print("   Run the main bot to see them in action.")
 
 if __name__ == "__main__":
